@@ -1,5 +1,5 @@
 /.venv/
-/data/*
+/outputs/*
 /models/trained/*
 /models/base/*
 **/__pycache__/
