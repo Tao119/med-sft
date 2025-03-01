@@ -14,6 +14,7 @@ COPY requirements.txt /workspace/requirements.txt
 RUN pip3 install --no-cache-dir --upgrade pip
 RUN pip3 install --no-cache-dir -r requirements.txt \
     --extra-index-url https://download.pytorch.org/whl/cu118
+RUN pip3 install -U triton
 
 # 6. scriptsディレクトリをコピー（任意）
 COPY scripts/ /workspace/scripts/
