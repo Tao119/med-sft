@@ -1,13 +1,23 @@
 import torch
 from datasets import load_dataset
 from transformers import Qwen2Tokenizer, AutoModelForSequenceClassification, DataCollatorWithPadding
+from peft import LoraConfig, get_peft_model
 from trl import RewardTrainer, RewardConfig
 
 def preprocess_fn(example):
+    if "prompt" not in example or "response_1" not in example or "response_2" not in example or "label" not in example:
+        raise ValueError(f"Missing necessary keys in example: {example}")
+
+    chosen = example["response_1"] if example["label"] == 1 else example["response_2"]
+    rejected = example["response_2"] if example["label"] == 1 else example["response_1"]
+
+    if not chosen or not rejected:
+        raise ValueError(f"Invalid chosen/rejected values in example: {example}")
+
     return {
         "prompt": example["prompt"],
-        "chosen": example["response_1"] if example["label"] == 1 else example["response_2"], 
-        "rejected": example["response_2"] if example["label"] == 1 else example["response_1"], 
+        "chosen": chosen,
+        "rejected": rejected
     }
 
 def main():
@@ -15,7 +25,15 @@ def main():
     data_path = "/workspace/data/reward_data.jsonl"
     output_dir = "/workspace/outputs/reward_output"
 
-    # Reward モデルの設定
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj"]
+    )
+
     training_args = RewardConfig(
         num_train_epochs=1,
         per_device_train_batch_size=1,
@@ -23,45 +41,36 @@ def main():
         output_dir=output_dir
     )
 
-    # データセットの読み込み
     dataset = load_dataset("json", data_files=data_path, split="train")
-    dataset = dataset.map(preprocess_fn)
-    print("Dataset loaded successfully. Features:", dataset.features)
+    dataset = dataset.map(preprocess_fn, remove_columns=dataset.column_names)
 
-    # トークナイザーの読み込み
-    tokenizer = Qwen2Tokenizer.from_pretrained(
-        base_model,
-        trust_remote_code=True
-    )
+    print("Sample data: ", dataset[0])
 
-    # **トークナイザーが適切にロードされたか確認**
-    if tokenizer is None:
-        raise ValueError("Tokenizer failed to load. Check the model path.")
+    try:
+        tokenizer = Qwen2Tokenizer.from_pretrained(base_model, trust_remote_code=True)
+        if tokenizer is None:
+            raise ValueError("Tokenizer failed to load. Check the model path.")
+    except Exception as e:
+        raise RuntimeError(f"Error loading tokenizer: {e}")
 
-    print("Tokenizer loaded successfully:", tokenizer)
+    print("Tokenizer loaded successfully:")
 
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # データのコラレータ（バッチ処理用）
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-    # モデルの読み込み（分類用）
     model = AutoModelForSequenceClassification.from_pretrained(
         base_model,
-        num_labels=1,  # 分類タスクの出力を1つに設定
+        num_labels=1,
         torch_dtype=torch.float16,
     )
-
-    # Trainer のセットアップ
+    model = get_peft_model(model, lora_config)
     trainer = RewardTrainer(
         model=model,
+        processing_class=tokenizer,
         args=training_args,
         train_dataset=dataset,
-        data_collator=data_collator  # `tokenizer` を削除し `data_collator` のみ渡す
     )
 
-    # トレーニングの実行
     trainer.train()
     trainer.save_model(output_dir)
     print("Reward model training complete.")

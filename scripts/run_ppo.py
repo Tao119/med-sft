@@ -1,7 +1,16 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead, create_reference_model
+
+def preprocess_fn(example):
+    """データの前処理関数"""
+    if "prompt" not in example:
+        raise ValueError(f"Missing prompt key in example: {example}")
+    
+    return {
+        "prompt": example["prompt"]
+    }
 
 def main():
     policy_model_path = "/workspace/outputs/sft_output"
@@ -11,19 +20,17 @@ def main():
 
     # PPO の設定
     ppo_config = PPOConfig(
-        model_name=policy_model_path,
         learning_rate=1e-6,
         batch_size=1,
         mini_batch_size=1,
         gradient_accumulation_steps=1,
-        max_prompt_length=512,
-        log_with=None,
         output_dir=output_dir
     )
 
-    # データセットの読み込み
+    # データセットの読み込みと前処理
     dataset = load_dataset("json", data_files=data_path, split="train")
-    print("Dataset loaded successfully. Features:", dataset.features)  # デバッグ用
+    dataset = dataset.map(preprocess_fn, remove_columns=dataset.column_names)
+    print("Dataset processed successfully. Features:", dataset.features)
 
     # トークナイザーの読み込み
     tokenizer = AutoTokenizer.from_pretrained(policy_model_path)
@@ -47,14 +54,18 @@ def main():
         torch_dtype=torch.float16
     )
 
+    # `stop_token_id` を手動で設定
+    stop_token_id = tokenizer.eos_token_id
+
     # PPOTrainer のセットアップ
     ppo_trainer = PPOTrainer(
-        config=ppo_config,
+        args=ppo_config,
+        processing_class=tokenizer,
         model=model,
         ref_model=ref_model,
-        tokenizer=tokenizer,
         reward_model=reward_model,
-        dataset=dataset
+        train_dataset=dataset,
+        stop_token_id=stop_token_id  # 追加
     )
 
     # 1エポックのみデモ実行（データ数に応じて調整）

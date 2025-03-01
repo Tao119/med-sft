@@ -1,18 +1,21 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, Qwen2Tokenizer
+from transformers import  AutoModelForCausalLM, Qwen2Tokenizer
 from trl import SFTTrainer, SFTConfig
 from peft import LoraConfig, get_peft_model
 
-# **データセットの前処理関数**
 def preprocess_fn(example):
-    if example.get("input"):
-        prompt_text = f"User: {example['instruction']}\nAdditional Input: {example['input']}\nAssistant:"
-    else:
-        prompt_text = f"User: {example['instruction']}\nAssistant:"
+    if "instruction" not in example:
+        raise ValueError(f"Missing 'instruction' in example: {example}")
+
+    prompt_text = f"User: {example['instruction']}"
+    if "input" in example and example["input"]:
+        prompt_text += f"\nAdditional Input: {example['input']}"
+    prompt_text += "\nAssistant:"
+
     return {
         "prompt": prompt_text,
-        "response": example["output"]
+        "response": example["output"] if "output" in example else ""
     }
 
 def main():
@@ -20,7 +23,6 @@ def main():
     data_path = "/workspace/data/sft_data.jsonl"
     output_dir = "/workspace/outputs/sft_output"
 
-    # LoRA 設定
     lora_config = LoraConfig(
         r=8,
         lora_alpha=16,
@@ -30,43 +32,35 @@ def main():
         target_modules=["q_proj", "v_proj"]
     )
 
-    # SFT 設定
     training_args = SFTConfig(
         num_train_epochs=1,
         max_seq_length=512,
         learning_rate=1e-4,
         per_device_train_batch_size=1,
         output_dir=output_dir,
-        dataset_text_field="prompt",  # ここを "text" ではなく "prompt" にする
-        label_names=["labels"]  # `No label_names provided` の警告を防ぐ
+        dataset_text_field="prompt" 
     )
 
-    # データセット読み込み
     dataset = load_dataset("json", data_files=data_path, split="train")
-    
-    # トークナイザーの読み込み
-    tokenizer = Qwen2Tokenizer.from_pretrained(
-        base_model,
-        trust_remote_code=True
-    )
+    dataset = dataset.map(preprocess_fn, remove_columns=dataset.column_names)
+
+    print("Sample data:", dataset[0])
+
+    tokenizer = Qwen2Tokenizer.from_pretrained(base_model, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # モデルの読み込み
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=torch.float16
     )
 
-    # LoRA の適用
     model = get_peft_model(model, lora_config)
 
-    # Trainer のセットアップ
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
-        preprocess_logits_for_metrics=preprocess_fn,  # tokenizer の代わりに `preprocess_fn` を使う
+        train_dataset=dataset
     )
 
     trainer.train()
